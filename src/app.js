@@ -5,18 +5,21 @@ const UserAgent = require('fake-useragent');
 
 const app = express();
 
-// Generic function to fetch JSON data from Hanime API
+// <<< Hanime session cookie >>>
+const HANIME_COOKIE = 'htv3session=0OowBjpl1VCRGfUeusGLWWzReikYfxTM0wzF_hNTcj3tgJsGq6My-pK5lPymZVQbYica9M4W78cifnwF-6VrKUWhbNkAI4RDaL8Z0cbChlhKS94yYybgL2sXfeiyvpiJ(-(0)-)eQ7f2pyVdidGtYYzpoqw-g==';
+
 const jsongen = async (url) => {
   try {
     const headers = {
       'X-Signature-Version': 'web2',
       'X-Signature': crypto.randomBytes(32).toString('hex'),
       'User-Agent': new UserAgent().random,
+      'Cookie': HANIME_COOKIE,
     };
     const res = await axios.get(url, { headers });
     return res.data;
   } catch (error) {
-    throw new Error(`Error fetching data: ${error.message}`);
+    throw new Error(`API fetch error: ${error.message}`);
   }
 };
 
@@ -30,7 +33,7 @@ app.use((err, req, res, next) => {
 const getTrending = async (time, page) => {
   const trendingUrl = `https://hanime.tv/api/v8/browse-trending?time=${time}&page=${page}&order_by=views&ordering=desc`;
   const urldata = await jsongen(trendingUrl);
-  const jsondata = urldata.hentai_videos.map((x) => ({
+  return urldata.hentai_videos.map((x) => ({
     id: x.id,
     name: x.name,
     slug: x.slug,
@@ -38,7 +41,6 @@ const getTrending = async (time, page) => {
     views: x.views,
     link: `/watch/${x.slug}`,
   }));
-  return jsondata;
 };
 
 // Get video details by numeric ID
@@ -105,7 +107,6 @@ app.get('/watch/:slug', async (req, res, next) => {
   try {
     const { slug } = req.params;
 
-    // Fetch trending and browse lists to map slug → numeric ID
     const trending = await getTrending('1', '1');
     const browse = await getBrowse();
     const allVideos = [...trending, ...(browse.hentai_videos || [])];
