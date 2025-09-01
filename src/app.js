@@ -1,38 +1,22 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const UserAgent = require('fake-useragent');
 
 const app = express();
 
-// Use a static User-Agent to avoid fake-useragent issues on cloud
-const userAgent =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36';
-
-// Environment variable for optional proxy: PROXY_URL=host:port
+// Generic function to fetch JSON data from Hanime API
 const jsongen = async (url) => {
   try {
     const headers = {
       'X-Signature-Version': 'web2',
       'X-Signature': crypto.randomBytes(32).toString('hex'),
-      'User-Agent': userAgent,
+      'User-Agent': new UserAgent().random,
     };
-
-    const proxyUrl = process.env.PROXY_URL || null;
-
-    const res = await axios.get(url, {
-      headers,
-      proxy: proxyUrl
-        ? {
-            host: proxyUrl.split(':')[0],
-            port: parseInt(proxyUrl.split(':')[1]),
-          }
-        : undefined,
-    });
-
+    const res = await axios.get(url, { headers });
     return res.data;
   } catch (error) {
-    console.error('API fetch error:', error.message);
-    return null; // Return null on failure instead of throwing
+    throw new Error(`Error fetching data: ${error.message}`);
   }
 };
 
@@ -42,12 +26,11 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong' });
 });
 
-// Safely get trending
+// Get trending videos
 const getTrending = async (time, page) => {
   const trendingUrl = `https://hanime.tv/api/v8/browse-trending?time=${time}&page=${page}&order_by=views&ordering=desc`;
   const urldata = await jsongen(trendingUrl);
-  if (!urldata || !urldata.hentai_videos) return [];
-  return urldata.hentai_videos.map((x) => ({
+  const jsondata = urldata.hentai_videos.map((x) => ({
     id: x.id,
     name: x.name,
     slug: x.slug,
@@ -55,59 +38,58 @@ const getTrending = async (time, page) => {
     views: x.views,
     link: `/watch/${x.slug}`,
   }));
+  return jsondata;
 };
 
-// Safely get video
-const getVideo = async (slug) => {
-  const videoApiUrl = `https://hanime.tv/api/v8/video?id=${slug}`;
+// Get video details by numeric ID
+const getVideo = async (id) => {
+  const videoApiUrl = `https://hanime.tv/api/v8/video?id=${id}`;
   const videoData = await jsongen(videoApiUrl);
-  if (!videoData || !videoData.hentai_video) return [];
-  const tags = (videoData.hentai_tags || []).map((t) => ({
+
+  const tags = videoData.hentai_tags.map((t) => ({
     name: t.text,
     link: `/hentai-tags/${t.text}/0`,
   }));
-  const streams =
-    (videoData.videos_manifest?.servers[0]?.streams || []).map((s) => ({
-      width: s.width,
-      height: s.height,
-      size_mbs: s.filesize_mbs,
-      url: s.url,
-    })) || [];
-  const episodes =
-    (videoData.hentai_franchise_hentai_videos || []).map((e) => ({
-      id: e.id,
-      name: e.name,
-      slug: e.slug,
-      cover_url: e.cover_url,
-      views: e.views,
-      link: `/watch/${e.slug}`,
-    })) || [];
-  return [
-    {
-      id: videoData.hentai_video.id,
-      name: videoData.hentai_video.name,
-      description: videoData.hentai_video.description,
-      poster_url: videoData.hentai_video.poster_url,
-      cover_url: videoData.hentai_video.cover_url,
-      views: videoData.hentai_video.views,
-      streams,
-      tags,
-      episodes,
-    },
-  ];
+
+  const streams = videoData.videos_manifest.servers[0].streams.map((s) => ({
+    width: s.width,
+    height: s.height,
+    size_mbs: s.filesize_mbs,
+    url: s.url,
+  }));
+
+  const episodes = videoData.hentai_franchise_hentai_videos.map((e) => ({
+    id: e.id,
+    name: e.name,
+    slug: e.slug,
+    cover_url: e.cover_url,
+    views: e.views,
+    link: `/watch/${e.slug}`,
+  }));
+
+  return [{
+    id: videoData.hentai_video.id,
+    name: videoData.hentai_video.name,
+    description: videoData.hentai_video.description,
+    poster_url: videoData.hentai_video.poster_url,
+    cover_url: videoData.hentai_video.cover_url,
+    views: videoData.hentai_video.views,
+    streams: streams,
+    tags: tags,
+    episodes: episodes,
+  }];
 };
 
-// Browse data
+// Get browse categories
 const getBrowse = async () => {
   const browseUrl = 'https://hanime.tv/api/v8/browse';
-  return (await jsongen(browseUrl)) || {};
+  return await jsongen(browseUrl);
 };
 
-// Browse videos safely
+// Get videos by type/category/page
 const getBrowseVideos = async (type, category, page) => {
   const browseUrl = `https://hanime.tv/api/v8/browse/${type}/${category}?page=${page}&order_by=views&ordering=desc`;
   const browsedata = await jsongen(browseUrl);
-  if (!browsedata || !browsedata.hentai_videos) return [];
   return browsedata.hentai_videos.map((x) => ({
     id: x.id,
     name: x.name,
@@ -118,45 +100,87 @@ const getBrowseVideos = async (type, category, page) => {
   }));
 };
 
-// Routes
-app.get('/watch/:slug', async (req, res) => {
-  const data = await getVideo(req.params.slug);
-  res.json({ results: data });
-});
+// Route: Watch video by slug
+app.get('/watch/:slug', async (req, res, next) => {
+  try {
+    const { slug } = req.params;
 
-app.get('/trending/:time/:page', async (req, res) => {
-  const data = await getTrending(req.params.time, req.params.page);
-  const nextPage = `/trending/${req.params.time}/${parseInt(req.params.page) + 1}`;
-  res.json({ results: data, next_page: nextPage });
-});
+    // Fetch trending and browse lists to map slug → numeric ID
+    const trending = await getTrending('1', '1');
+    const browse = await getBrowse();
+    const allVideos = [...trending, ...(browse.hentai_videos || [])];
 
-app.get('/browse/:type', async (req, res) => {
-  const { type } = req.params;
-  const data = await getBrowse();
-  let jsondata = data[type] || [];
-  if (type === 'hentai_tags') {
-    jsondata = jsondata.map((x) => ({ ...x, url: `/hentai-tags/${x.text}/0` }));
-  } else if (type === 'brands') {
-    jsondata = jsondata.map((x) => ({ ...x, url: `test${x.slug}/0` }));
+    const video = allVideos.find(v => v.slug === slug);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+
+    const jsondata = await getVideo(video.id);
+    res.json({ results: jsondata });
+  } catch (error) {
+    next(error);
   }
-  res.json({ results: jsondata });
 });
 
-app.get('/tags', async (req, res) => {
-  const data = await getBrowse();
-  const jsondata = (data.hentai_tags || []).map((x) => ({ ...x, url: `/tags/${x.text}/0` }));
-  res.json({ results: jsondata });
+// Route: Trending videos
+app.get('/trending/:time/:page', async (req, res, next) => {
+  try {
+    const { time, page } = req.params;
+    const jsondata = await getTrending(time, page);
+    const nextPage = `/trending/${time}/${parseInt(page) + 1}`;
+    res.json({ results: jsondata, next_page: nextPage });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.get('/:type/:category/:page', async (req, res) => {
-  const { type, category, page } = req.params;
-  const data = await getBrowseVideos(type, category, page);
-  const nextPage = `/${type}/${category}/${parseInt(page) + 1}`;
-  res.json({ results: data, next_page: nextPage });
+// Route: Browse categories
+app.get('/browse/:type', async (req, res, next) => {
+  try {
+    const { type } = req.params;
+    const data = await getBrowse();
+    let jsondata = data[type];
+
+    if (type === 'hentai_tags') {
+      jsondata = jsondata.map((x) => ({ ...x, url: `/hentai-tags/${x.text}/0` }));
+    } else if (type === 'brands') {
+      jsondata = jsondata.map((x) => ({ ...x, url: `/brands/${x.slug}/0` }));
+    }
+
+    res.json({ results: jsondata });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.get('/', (req, res) => res.send('Welcome to Hanime Api 👀'));
+// Route: Tags
+app.get('/tags', async (req, res, next) => {
+  try {
+    const data = await getBrowse();
+    const jsondata = data.hentai_tags.map((x) => ({ ...x, url: `/tags/${x.text}/0` }));
+    res.json({ results: jsondata });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Route: Browse videos by type/category/page
+app.get('/:type/:category/:page', async (req, res, next) => {
+  try {
+    const { type, category, page } = req.params;
+    const data = await getBrowseVideos(type, category, page);
+    const nextPage = `/${type}/${category}/${parseInt(page) + 1}`;
+    res.json({ results: data, next_page: nextPage });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Root route
+app.get('/', (req, res) => {
+  res.send('Welcome to Hanime API 👀');
+});
 
 // Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const server = app.listen(process.env.PORT || 3000, () => {
+  const port = server.address().port;
+  console.log(`Server is running on port ${port}`);
+});
